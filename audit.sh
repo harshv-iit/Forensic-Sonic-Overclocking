@@ -1,23 +1,21 @@
-```bash
-#!/data/data/com.termux/files/usr/bin/bash
+#!/bin/zsh
 # ==============================================================================
 # Script Name:  audit.sh
 # Description:  Forensic audio analysis and psychoacoustic SPL calibration utility.
-# Dependencies: ffmpeg (with ebur128), sox, python3
-# Target OS:    Android (Termux Environment)
+# Target OS:    macOS
 # ==============================================================================
 
-# Hardware baseline calibration (0 dBFS = 116 dB SPL)
-readonly HW_MAX=116
-readonly PROC_DIR="/sdcard/Music (processed)"
+# Hardware baseline calibration (0 dBFS = 120 dB SPL)
+readonly HW_MAX=120
+readonly PROC_DIR="$HOME/audio files (processed)"
 
 # Ensure output directory exists
 mkdir -p "$PROC_DIR"
 
 # 1. Path & Argument Resolution
 if [ -z "$1" ]; then
-    echo -e "\e[1;31mError: No input file specified.\e[0m"
-    echo "Usage: ./audit.sh <filename_or_path>"
+    printf "\033[1;31mError: No input file specified.\033[0m\n"
+    printf "Usage: ./audit.sh <filename_or_path>\n"
     exit 1
 fi
 
@@ -25,73 +23,49 @@ if [ -f "$1" ]; then
     FILE_PATH="$1"
 else
     SEARCH_NAME="$1"
-    # Search both the original music folder and the processed directory
-    FILE_PATH=$(find "/sdcard/Music" "$PROC_DIR" -iname "$SEARCH_NAME" -type f -print -quit 2>/dev/null)
+    FILE_PATH=$(find "$HOME/audio files" "$PROC_DIR" -type f -iname "$SEARCH_NAME" 2>/dev/null | head -n 1)
 fi
 
 if [ -z "$FILE_PATH" ] || [ ! -f "$FILE_PATH" ]; then
-    echo -e "\e[1;31mError: File not found: '$1'\e[0m"
+    printf "\033[1;31mError: Could not find '$1'\033[0m\n"
     exit 1
 fi
 
-echo -e "\e[1;32mTarget Resolved: $FILE_PATH\e[0m"
-echo -e "\e[1;33mExecuting EBU R128 Psychoacoustic Analysis...\e[0m"
+printf "\033[1;32mTarget Resolved: %s\033[0m\n" "$FILE_PATH"
+printf "\033[1;33mExecuting EBU R128 Psychoacoustic Analysis...\033[0m\n"
 
-# 2. Loudness Measurement (Pass 1)
-# We capture stderr as ebur128 outputs metric data over standard error.
-LOUDNESS_STATS=$(ffmpeg -hide_banner -i "$FILE_PATH" -af ebur128=peak=true -f null - 2>&1)
+# 2. Loudness Measurement
+LOUDNESS_STATS=$(ffmpeg -hide_banner -i "$FILE_PATH" -af loudnorm=print_format=summary -f null - 2>&1)
 
-# Parse output metrics safely using sed
-I_LUFS=$(echo "$LOUDNESS_STATS" | sed -n 's/.*I: *\([-0-9.]*\).*/\1/p' | tail -n 1)
-LRA=$(echo "$LOUDNESS_STATS" | sed -n 's/.*LRA: *\([-0-9.]*\).*/\1/p' | tail -n 1)
-TP_DB=$(echo "$LOUDNESS_STATS" | sed -n 's/.*Peak: *\([-0-9.]*\).*/\1/p' | head -n 1)
+I_LUFS=$(echo "$LOUDNESS_STATS" | python3 -c "import sys, re; m=re.search(r'Input Integrated:\s*([-0-9.]+)', sys.stdin.read()); print(m.group(1) if m else '-15.0')")
+LRA=$(echo "$LOUDNESS_STATS" | python3 -c "import sys, re; m=re.search(r'Input LRA:\s*([0-9.]+)', sys.stdin.read()); print(m.group(1) if m else '11.0')")
+TP_DB=$(echo "$LOUDNESS_STATS" | python3 -c "import sys, re; m=re.search(r'Input True Peak:\s*([-+0-9.]+)', sys.stdin.read()); print(m.group(1) if m else '-1.5')")
 
-# Handle cases where parsing fails by applying standard fallbacks
-I_LUFS=${I_LUFS:-"-14.0"}
-LRA=${LRA:-"11.0"}
-TP_DB=${TP_DB:-"-1.5"}
+I_LUFS=${I_LUFS:-"-15.0"}; LRA=${LRA:-"11.0"}; TP_DB=${TP_DB:-"-1.5"}
 
-# 3. Dual-Stage Volume Calibration via Python 3
-# Translates digital levels (dBFS) to real-world target SPLs (80, 85, 90 dB)
-# based on transducer sensitivity and output voltage limits.
+# 3. Volume Calibration via Python 3 (Software Preamp @ 120dB Max SPL)
 MATH_RESULT=$(python3 -c "
-def calculate_preamp(target, lufs, max_spl):
-    # Standard Android Volume step attenuation curve (Oreo/MIUI reference)
-    vol_steps = {15:0, 14:-2, 13:-4, 12:-7, 11:-10, 10:-13, 9:-17, 8:-21, 7:-25}
-    current_avg_spl = max_spl + lufs
-    total_needed_attenuation = target - current_avg_spl
-    
-    # Prioritize digital preamp headroom up to -30dB, then drop master volume step
-    for step in sorted(vol_steps.keys(), reverse=True):
-        attenuation = vol_steps[step]
-        preamp = total_needed_attenuation - attenuation
-        if preamp >= -30.0:
-            return step, round(preamp, 1)
-    return 7, round(total_needed_attenuation + 25, 1)
-
 lufs = float('$I_LUFS')
-c80 = calculate_preamp(80, lufs, $HW_MAX)
-c85 = calculate_preamp(85, lufs, $HW_MAX)
-c90 = calculate_preamp(90, lufs, $HW_MAX)
-
-print(f'{lufs}|{float(\"$LRA\")}|{float(\"$TP_DB\")}|' + '|'.join(map(str, c80)) + '|' + '|'.join(map(str, c85)) + '|' + '|'.join(map(str, c90)))
+max_spl = $HW_MAX
+p80 = round(80.0 - (max_spl + lufs), 1)
+p85 = round(85.0 - (max_spl + lufs), 1)
+p90 = round(90.0 - (max_spl + lufs), 1)
+print(f'{lufs}|{float(\"$LRA\")}|{float(\"$TP_DB\")}|{p80}|{p85}|{p90}')
 ")
 
-# Parse calculations back to shell environment
-IFS='|' read -r LUFS_VAL LRA_VAL TP_VAL S80 P80 S85 P85 S90 P90 <<< "$MATH_RESULT"
+IFS='|' read -r LUFS_VAL LRA_VAL TP_VAL P80 P85 P90 <<< "$MATH_RESULT"
 
 # 4. Reporting
-echo -e "\n\e[1;34m--- EBU R128 LOUDNESS METRICS ---\e[0m"
-echo "  Integrated Loudness: $LUFS_VAL LUFS"
-echo "  Loudness Range (LRA): $LRA_VAL LU"
-echo "  True Peak Level:     $TP_VAL dBTP"
+printf "\n\033[1;34m--- EBU R128 LOUDNESS METRICS ---\033[0m\n"
+printf "  Integrated Loudness: %s LUFS\n" "$LUFS_VAL"
+printf "  Loudness Range (LRA): %s LU\n" "$LRA_VAL"
+printf "  True Peak Level:     %s dBTP\n" "$TP_VAL"
 
-echo -e "\n\e[1;35m--- REAL-WORLD CALIBRATION (WHO Standard) ---\e[0m"
-echo -e "  80dB SPL (Relaxed):  Volume Step: \e[1;33m$S80\e[0m | Preamp: \e[1;32m${P80} dB\e[0m"
-echo -e "  85dB SPL (Reference):Volume Step: \e[1;33m$S85\e[0m | Preamp: \e[1;32m${P85} dB\e[0m"
-echo -e "  90dB SPL (Concert):  Volume Step: \e[1;33m$S90\e[0m | Preamp: \e[1;32m${P90} dB\e[0m"
+printf "\n\033[1;35m--- REAL-WORLD CALIBRATION (120dB Baseline) ---\033[0m\n"
+printf "  80dB SPL (Relaxed):  Preamp: \033[1;32m%s dB\033[0m\n" "$P80"
+printf "  85dB SPL (Reference):Preamp: \033[1;32m%s dB\033[0m\n" "$P85"
+printf "  90dB SPL (Concert):  Preamp: \033[1;32m%s dB\033[0m\n" "$P90"
 
-# 5. Spectrogram Generation (Saved to Processed folder)
+# 5. Spectrogram Generation
 sox "$FILE_PATH" -n spectrogram -o "$PROC_DIR/last_audit.png"
-echo -e "\n\e[1;32mSpectrogram successfully generated: $PROC_DIR/last_audit.png\e[0m"
-```
+printf "\n\033[1;32mSpectrogram successfully generated: %s/last_audit.png\033[0m\n" "$PROC_DIR"
