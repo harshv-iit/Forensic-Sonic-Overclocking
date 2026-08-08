@@ -72,6 +72,8 @@ To successfully run complex floating-point DSP on budget mobile processors (e.g.
 * **Low-Priority Scheduling:** Invoked Unix process priority scheduling (`nice -n 19`) to ensure background processing does not interfere with the host system's audio playback engines.
 * **Metadata Integrity:** Bypassed standard output pipe redirections during conversion, ensuring the output container writes absolute metadata headers (preventing integer overflow bitrate errors in local media players).
 
+##Note:v1.0-android is a cut-down version of the original code
+
 ---
 ## License
 This project is licensed under the MIT License - see the LICENSE file for details.
